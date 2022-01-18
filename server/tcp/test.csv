@@ -1,0 +1,72 @@
+import socket
+from threading import Thread
+import traceback
+import os
+import json
+
+BUFFER_SIZE = 1024
+
+
+class ServerTCP(Thread):
+    def __init__(self, port, storage='.', host=socket.gethostname()):
+        Thread.__init__(self)
+        self.port = port
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.host = host
+        self.storage = storage
+        self.clients = []
+
+    def __setup__(self):
+        self.socket.bind((self.host, self.port))
+        self.socket.listen()
+        print(f"Listening in {self.host} and {self.port}")
+
+    def main_loop(self):
+        self.__setup__()
+        while True:
+            conn, (client_host, client_port) = self.socket.accept()
+            print(f'Incoming Connection from {client_host} {client_port}')
+            new_client = ServerWorker(client_port, client_host, conn, self.storage)
+            new_client.start()
+            self.clients.append(new_client)
+
+        print("Cerrando conexiones")
+        for client in self.clients:
+            client.join()
+
+
+class ServerWorker(Thread):
+    def __init__(self, port, host, socket, source_dir):
+        Thread.__init__(self)
+        self.port = port
+        self.host = host
+        self.socket = socket
+        self.source_dir = source_dir
+
+    def __close_conection(self):
+        self.socket.close()
+
+    def run(self):
+        rcv_packet = self.socket.recv(BUFFER_SIZE)
+        filename = rcv_packet.decode()
+        print(f"Client {self.host}:{self.port} requested file: {filename}")
+        try:
+            file_requested = open(f"{self.source_dir}/{filename}", 'rb')
+            response = {"code": 200, "length": os.path.getsize(f"{self.source_dir}/{filename}")}
+            self.socket.send(json.dumps(response).encode())
+            print("Sending")
+            while(True):
+                file_buffered = file_requested.read(BUFFER_SIZE)
+                while(file_buffered):
+                    self.socket.send(file_buffered)
+                    file_buffered = file_requested.read(BUFFER_SIZE)
+                if not file_buffered:
+                    file_requested.close()
+                    self.__close_conection()
+                    break
+        except FileNotFoundError:
+            response = {"code": 400}
+            self.socket.send(json.dumps(response).encode())
+            print(traceback.format_exc())
+            self.socket.send(f"file: {filename} not found".encode())

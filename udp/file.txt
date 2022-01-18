@@ -1,0 +1,158 @@
+import os
+import traceback
+from time import sleep
+from random import randint
+from socket import socket, AF_INET, SOCK_DGRAM
+from udp.udp_packet import UDPPacket
+from udp.utils import assembly_packet, extract_packet
+from udp.constants import BUF_SIZE, DATA_SIZE, TIMEOUT, MSG_INIT, MSG_UPLOAD_REQ, MSG_DOWNLOAD_REQ, MSG_UPLOAD, MSG_UPLOAD_ACK, MSG_CLOSE, MSG_EMPTY, MSG_INITACK, MSG_UPLOAD_REQ_ACK
+
+
+MODE = "UPLOAD"
+FILE_REQUEST_UPLOAD = "./udp/file.txt"
+FILE_REQUEST_DOWNLOAD = "./file.txt"
+
+NAME_FILE = "new_file.txt"
+PATH_DST = "./"
+
+
+class ClientUDP():
+    def __init__(self, host, port, dst, name):
+        self.socket = socket(AF_INET, SOCK_DGRAM)
+        self.server_addr = (host, port)
+        self.file_name = dst + name
+        self.socket.settimeout(TIMEOUT)
+        self.sequence_number = randint(0, 100)
+        self.to_ack = self.sequence_number
+        self.last_packet_acked = None
+
+    def generate_init_packet(self):
+        return assembly_packet(UDPPacket(MSG_INIT, MSG_EMPTY, 0, self.sequence_number))
+
+    def generate_init_ack_packet(self):
+        return assembly_packet(UDPPacket(MSG_INITACK, MSG_EMPTY, 0, self.sequence_number))
+
+    def generate_upload_req_packet(self, filename):
+        filesize = os.path.getsize(filename)
+        upload_filename = os.path.basename(filename)
+        return assembly_packet(UDPPacket(MSG_UPLOAD_REQ, upload_filename, filesize, self.sequence_number))
+
+    def generate_download_req_packet(self, filename):
+        download_filename = os.path.basename(filename)
+        return assembly_packet(UDPPacket(MSG_DOWNLOAD_REQ, download_filename, 0, self.sequence_number))
+
+    def generate_upload_package(self, filename, data):
+        filesize = os.path.getsize(filename)
+        upload_filename = os.path.basename(filename)
+        return assembly_packet(UDPPacket(MSG_UPLOAD, upload_filename, filesize, self.sequence_number, data))
+
+    def generate_close_packet(self):
+        return assembly_packet(UDPPacket(MSG_CLOSE, '', 0, self.sequence_number, ''))
+
+    def connect_server(self):
+        while True:
+            packet = self.generate_init_packet()
+            try:
+                self.socket.sendto(packet, self.server_addr)
+                data, addr = self.socket.recvfrom(BUF_SIZE)
+                packet_rcv = extract_packet(data)
+                print(f"[CLIENT] - response: {vars(packet_rcv)}")
+                if(packet_rcv.mode == MSG_INITACK):
+                    self.last_packet_acked = packet
+                    packet = self.generate_init_ack_packet()
+                    self.socket.sendto(packet, self.server_addr)
+                    return packet, addr
+            except:# Timeout, vuelve a enviar el INIT
+                traceback.print_exc()
+                pass
+
+    def request_upload(self, filename):
+        while True:
+            packet = self.generate_upload_req_packet(filename)
+            try:
+                self.socket.sendto(packet, self.server_addr)
+                print("[CLIENT] - Upload Request sent, waiting for UPLOAD ACK")
+                data, addr = self.socket.recvfrom(BUF_SIZE)
+                packet_recv = extract_packet(data)
+                print(f"[CLIENT] - response: {vars(packet_recv)}")
+                if(packet_recv.mode == MSG_UPLOAD_REQ_ACK):
+                    self.last_packet_acked = packet
+                    return packet_recv, addr
+            except:  # Timeout, vuelve a enviar el INIT
+                pass
+
+    def request_download(self, filename):
+        while True:
+            packet = self.generate_download_req_packet(filename)
+            try:
+                self.socket.sendto(packet, self.server_addr)
+                print("[CLIENT] - Upload Request sent, waiting for DOWNLOAD ACK")
+                data, addr = self.socket.recvfrom(BUF_SIZE)
+                packet = extract_packet(data)
+                print(f"[CLIENT] - response: {vars(packet)}")
+                return packet, addr
+            except:# Timeout, vuelve a enviar el INIT
+                pass
+
+    def close_connection(self):
+        while True:
+            packet = self.generate_close_packet()
+            try:
+                self.socket.sendto(packet, self.server_addr)
+                print("[CLIENT] - Send close connection request")
+                data, addr = self.socket.recvfrom(BUF_SIZE)
+                packet = extract_packet(data)
+                print(f"[CLIENT] - response: {vars(packet)}")
+                break
+            except:# Timeout, vuelve a enviar el INIT
+                pass
+        self.socket.close()
+
+    def send_file(self, filename):
+        filesize = os.path.getsize(filename)
+        file = open(filename, "r")
+        read_next = True
+        while file:
+            if(read_next):
+                data_to_send = file.read(DATA_SIZE)
+                filesize -= len(data_to_send)
+                self.to_ack = self.sequence_number + min(DATA_SIZE, filesize)
+            read_next = False
+            packet = self.generate_upload_package(filename, data_to_send)
+            try:
+                self.socket.sendto(packet, self.server_addr)
+                print(extract_packet(packet).__dict__)
+                print("[CLIENT] - Upload packet sent, waiting for UPLOAD ACK")
+                data, addr = self.socket.recvfrom(BUF_SIZE)
+                packet = extract_packet(data)
+                print(f"[CLIENT] - response: {vars(packet)}")
+                if((packet.mode != MSG_UPLOAD_ACK) and (packet.sequence_number != self.to_ack)):
+                    print("[CLIENT] - Retransmiting last packet")
+                    self.socket.sendto(packet, self.server_addr)
+                    print("[CLIENT] - Upload packet sent, waiting for UPLOAD ACK")
+                else:
+                    read_next = True
+                    break
+            except:
+                print("[CLIENT] - Timeout, proceeding to retransmit")
+                pass
+
+    def run(self):
+        print("[CLIENT] - Establishing connection with server")
+        data, addr = self.connect_server()
+        print("[CLIENT] - Connection established")
+
+        if(MODE == 'UPLOAD'):
+            data, addr = self.request_upload(FILE_REQUEST_UPLOAD)
+            self.send_file(FILE_REQUEST_UPLOAD)
+        else:
+            data, addr = self.request_download(FILE_REQUEST_DOWNLOAD)
+            self.recieve_file(FILE_REQUEST_DOWNLOAD)
+        print("File downloaded")
+
+        self.close_connection()
+        print("[CLIENT] - Connection closed")
+
+
+recv = ClientUDP("localhost", 5000, PATH_DST, NAME_FILE)
+recv.run()
